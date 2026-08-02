@@ -376,9 +376,10 @@ def build_excel(df: pd.DataFrame) -> io.BytesIO:
         ws2.cell(row=m_total, column=col).number_format = '"$"#,##0.00'
     style_total_row(ws2, m_total, len(headers2))
 
-    # Negative Net (the month lost money) shows in dark red, including the TOTAL row.
+    # Negative Net (the month lost money) shows in dark red. The TOTAL row is
+    # excluded — red text over the solid blue banner reads poorly, so it stays white.
     ws2.conditional_formatting.add(
-        f"D{m_first}:D{m_total}",
+        f"D{m_first}:D{m_last}",
         CellIsRule(operator="lessThan", formula=["0"], font=Font(name="Calibri", size=11, color=DEBIT_COLOR)),
     )
 
