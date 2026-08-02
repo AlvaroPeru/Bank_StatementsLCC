@@ -11,6 +11,7 @@ from collections import defaultdict
 from openpyxl import Workbook
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 from openpyxl.utils import get_column_letter
+from openpyxl.formatting.rule import FormulaRule
 
 st.set_page_config(page_title="RBC → Excel", page_icon="🏦", layout="centered")
 st.title("🏦 RBC Bank Statements → Excel")
@@ -21,7 +22,17 @@ MONTH_MAP = {"Jan":1,"Feb":2,"Mar":3,"Apr":4,"May":5,"Jun":6,
 DATE = re.compile(r"^(\d{1,2})(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)", re.I)
 
 # ── Categorías: mismas reglas que la fórmula que se escribe en Excel ──
-CATEGORIES = ["Airbnb", "Transfer", "Wire Payment", "Bank Fee", "Other"]
+CATEGORIES = ["Airbnb", "Transfer", "Wire Payment", "Bank Fee", "Cash Withdrawal", "Other"]
+
+# Color por categoría (fondo + texto blanco en negrita)
+CATEGORY_COLORS = {
+    "Airbnb":          "FF5A5F",  # rojo/rosa de marca Airbnb
+    "Transfer":        "2E75B6",  # azul
+    "Wire Payment":    "7030A0",  # morado
+    "Bank Fee":        "E67E22",  # naranja
+    "Cash Withdrawal": "795548",  # café
+    "Other":           "95A5A6",  # gris
+}
 
 
 def get_years(text):
@@ -208,7 +219,7 @@ def build_excel(df: pd.DataFrame) -> io.BytesIO:
     # ---------- Hoja 1: Transactions ----------
     ws = wb.create_sheet("Transactions")
     headers = ["Year", "Month", "Day", "Date", "Description",
-               "Credit", "Debit", "Balance", "File", "Category"]
+               "Credit", "Debit", "Balance (PDF)", "Balance (Fórmula)", "File", "Category"]
     ncols = len(headers)
 
     style_title(ws, "📊 Bank Account Statement - Transactions", ncols, size=18)
@@ -230,20 +241,27 @@ def build_excel(df: pd.DataFrame) -> io.BytesIO:
             ws.cell(row=r, column=6, value=row.Credito)
         if pd.notna(row.Debito):
             ws.cell(row=r, column=7, value=row.Debito)
-        # Balance: valor real extraído del PDF del banco (no se recalcula por fórmula,
-        # porque es el saldo oficial del estado de cuenta, no algo derivado en la hoja)
+        # Balance (PDF): valor real extraído del estado de cuenta del banco (no es una
+        # fórmula, porque es el saldo oficial del banco, no algo derivado en la hoja)
         if pd.notna(row.Balance):
             ws.cell(row=r, column=8, value=row.Balance)
-        ws.cell(row=r, column=9, value=row.Archivo)
+        # Balance (Fórmula): recalculado a partir de Créditos/Débitos, fila 1 se ancla
+        # al saldo real del PDF y de ahí en adelante se arrastra con fórmula
+        if i == 0:
+            ws.cell(row=r, column=9, value=row.Balance)
+        else:
+            ws.cell(row=r, column=9, value=f"=I{r-1}+F{r}-G{r}")
+        ws.cell(row=r, column=10, value=row.Archivo)
         # Categoría: fórmula dinámica basada en la descripción (se recalcula si se edita)
-        ws.cell(row=r, column=10, value=(
+        ws.cell(row=r, column=11, value=(
             f'=IF(ISNUMBER(SEARCH("AIRBNB",E{r})),"Airbnb",'
             f'IF(ISNUMBER(SEARCH("transfer",E{r})),"Transfer",'
             f'IF(ISNUMBER(SEARCH("wire",E{r})),"Wire Payment",'
-            f'IF(ISNUMBER(SEARCH("fee",E{r})),"Bank Fee","Other"))))'
+            f'IF(ISNUMBER(SEARCH("fee",E{r})),"Bank Fee",'
+            f'IF(ISNUMBER(SEARCH("withdrawal",E{r})),"Cash Withdrawal","Other")))))'
         ))
 
-        for col in (6, 7, 8):
+        for col in (6, 7, 8, 9):
             ws.cell(row=r, column=col).number_format = '"$"#,##0.00'
 
         style_data_row(ws, r, ncols, first_data_row, is_first=(i == 0), size=10)
@@ -253,14 +271,28 @@ def build_excel(df: pd.DataFrame) -> io.BytesIO:
     ws.cell(row=total_row, column=6, value=f"=SUM(F{first_data_row}:F{last_data_row})")
     ws.cell(row=total_row, column=7, value=f"=SUM(G{first_data_row}:G{last_data_row})")
     ws.cell(row=total_row, column=8, value=f"=F{total_row}-G{total_row}")
+    # Balance (Fórmula) no se totaliza: es un saldo, no algo acumulable con SUM
     for col in (6, 7, 8):
         ws.cell(row=total_row, column=col).number_format = '"$"#,##0.00'
     style_total_row(ws, total_row, ncols)
 
     widths = {"A": 8.33, "B": 6.66, "C": 6.66, "D": 15, "E": 46.66,
-              "F": 14.16, "G": 14.16, "H": 15, "I": 41.66, "J": 16.66}
+              "F": 14.16, "G": 14.16, "H": 15, "I": 15, "J": 41.66, "K": 16.66}
     for col, w in widths.items():
         ws.column_dimensions[col].width = w
+
+    # Colores por categoría: formato condicional sobre la columna K, así se recalcula
+    # automáticamente si el usuario edita una descripción y la categoría cambia.
+    for cat, color in CATEGORY_COLORS.items():
+        ws.conditional_formatting.add(
+            f"K{first_data_row}:K{last_data_row}",
+            FormulaRule(
+                formula=[f'$K{first_data_row}="{cat}"'],
+                fill=PatternFill("solid", fgColor=color),
+                font=Font(name="Calibri", size=10, bold=True, color=WHITE),
+                stopIfTrue=True,
+            ),
+        )
 
     ws.freeze_panes = "A4"
     finalize_sheet(ws)
@@ -318,12 +350,18 @@ def build_excel(df: pd.DataFrame) -> io.BytesIO:
     for i, cat in enumerate(CATEGORIES):
         r = c_first + i
         ws3.cell(row=r, column=1, value=cat)
-        ws3.cell(row=r, column=2, value=f"=COUNTIF(Transactions!$J:$J,A{r})")
+        ws3.cell(row=r, column=2, value=f"=COUNTIF(Transactions!$K:$K,A{r})")
         c_last_preview = c_first + len(CATEGORIES) - 1
         ws3.cell(row=r, column=3, value=f"=B{r}/SUM($B${c_first}:$B${c_last_preview})")
         ws3.cell(row=r, column=3).number_format = "0.0%"
-        ws3.cell(row=r, column=1).alignment = Alignment(horizontal="left", vertical="center")
         style_data_row(ws3, r, len(headers3), c_first, is_first=(i == 0), size=11)
+
+        # Colorear la fila entera con el color de su categoría
+        color = CATEGORY_COLORS.get(cat, "95A5A6")
+        for col in (1, 2, 3):
+            cc = ws3.cell(row=r, column=col)
+            cc.fill = PatternFill("solid", fgColor=color)
+            cc.font = Font(name="Calibri", size=11, bold=True, color=WHITE)
         ws3.cell(row=r, column=1).alignment = Alignment(horizontal="left", vertical="center")
 
     c_last = c_first + len(CATEGORIES) - 1
