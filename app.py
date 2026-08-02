@@ -8,7 +8,7 @@ from pathlib import Path
 from collections import defaultdict
 from openpyxl import Workbook
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
-from openpyxl.formatting.rule import FormulaRule
+from openpyxl.formatting.rule import FormulaRule, CellIsRule
 
 TORONTO_TZ = ZoneInfo("America/Toronto")
 
@@ -242,8 +242,10 @@ def build_excel(df: pd.DataFrame) -> io.BytesIO:
 
     # ---------- Sheet 1: Transactions ----------
     ws = wb.create_sheet("Transactions")
+    # Debit before Credit, matching RBC's own column order ("Cheques & Debits"
+    # comes before "Deposits & Credits" on the statement) for easier cross-checking.
     headers = ["Year", "Month", "Day", "Date", "Description",
-               "Credit", "Debit", "Balance (PDF)", "Balance (Formula)", "File", "Category"]
+               "Debit", "Credit", "Balance (PDF)", "Balance (Formula)", "File", "Category"]
     ncols = len(headers)
 
     style_title(ws, "📊 Bank Account Statement - Transactions", ncols, size=18)
@@ -261,10 +263,10 @@ def build_excel(df: pd.DataFrame) -> io.BytesIO:
         dcell = ws.cell(row=r, column=4, value=datetime.combine(row.Date, datetime.min.time()))
         dcell.number_format = "mm-dd-yy"
         ws.cell(row=r, column=5, value=row.Description)
-        if pd.notna(row.Credit):
-            ws.cell(row=r, column=6, value=row.Credit)
         if pd.notna(row.Debit):
-            ws.cell(row=r, column=7, value=row.Debit)
+            ws.cell(row=r, column=6, value=row.Debit)
+        if pd.notna(row.Credit):
+            ws.cell(row=r, column=7, value=row.Credit)
         # Balance (PDF): the real value extracted from the bank's statement (not a
         # formula, since it's the bank's official balance, not something derived here)
         if pd.notna(row.Balance):
@@ -274,7 +276,7 @@ def build_excel(df: pd.DataFrame) -> io.BytesIO:
         if i == 0:
             ws.cell(row=r, column=9, value=row.Balance)
         else:
-            ws.cell(row=r, column=9, value=f"=I{r-1}+F{r}-G{r}")
+            ws.cell(row=r, column=9, value=f"=I{r-1}+G{r}-F{r}")
         ws.cell(row=r, column=10, value=row.File)
         # Category: dynamic formula based on the description (recalculates if edited)
         ws.cell(row=r, column=11, value=(
@@ -290,18 +292,17 @@ def build_excel(df: pd.DataFrame) -> io.BytesIO:
 
         style_data_row(ws, r, ncols, first_data_row, is_first=(i == 0), size=10)
 
-        # Positive amounts (Credit) in dark green, negative amounts (Debit) in dark
-        # red. Balance columns are left untouched, as requested.
-        if pd.notna(row.Credit):
-            ws.cell(row=r, column=6).font = Font(name="Calibri", size=10, color=CREDIT_COLOR)
+        # Positive amounts (Credit) in dark green, negative amounts (Debit) in dark red.
         if pd.notna(row.Debit):
-            ws.cell(row=r, column=7).font = Font(name="Calibri", size=10, color=DEBIT_COLOR)
+            ws.cell(row=r, column=6).font = Font(name="Calibri", size=10, color=DEBIT_COLOR)
+        if pd.notna(row.Credit):
+            ws.cell(row=r, column=7).font = Font(name="Calibri", size=10, color=CREDIT_COLOR)
 
     total_row = last_data_row + 1
     ws.cell(row=total_row, column=5, value="TOTAL")
     ws.cell(row=total_row, column=6, value=f"=SUM(F{first_data_row}:F{last_data_row})")
     ws.cell(row=total_row, column=7, value=f"=SUM(G{first_data_row}:G{last_data_row})")
-    ws.cell(row=total_row, column=8, value=f"=F{total_row}-G{total_row}")
+    ws.cell(row=total_row, column=8, value=f"=G{total_row}-F{total_row}")
     # Balance (Formula) is not totaled: it's a running balance, not something summable
     for col in (6, 7, 8):
         ws.cell(row=total_row, column=col).number_format = '"$"#,##0.00'
@@ -327,6 +328,13 @@ def build_excel(df: pd.DataFrame) -> io.BytesIO:
             ),
         )
 
+    # Negative balances (account overdrawn) show in dark red, on both the PDF
+    # balance and the formula-driven balance.
+    ws.conditional_formatting.add(
+        f"H{first_data_row}:I{last_data_row}",
+        CellIsRule(operator="lessThan", formula=["0"], font=Font(name="Calibri", size=10, color=DEBIT_COLOR)),
+    )
+
     ws.freeze_panes = "A4"
     finalize_sheet(ws)
 
@@ -344,12 +352,12 @@ def build_excel(df: pd.DataFrame) -> io.BytesIO:
         ws2.cell(row=r, column=2, value=(
             f"=SUMPRODUCT((YEAR(Transactions!$D${first_data_row}:$D${last_data_row})={y})*"
             f"(MONTH(Transactions!$D${first_data_row}:$D${last_data_row})={m})*"
-            f"(Transactions!$F${first_data_row}:$F${last_data_row}))"
+            f"(Transactions!$G${first_data_row}:$G${last_data_row}))"
         ))
         ws2.cell(row=r, column=3, value=(
             f"=SUMPRODUCT((YEAR(Transactions!$D${first_data_row}:$D${last_data_row})={y})*"
             f"(MONTH(Transactions!$D${first_data_row}:$D${last_data_row})={m})*"
-            f"(Transactions!$G${first_data_row}:$G${last_data_row}))"
+            f"(Transactions!$F${first_data_row}:$F${last_data_row}))"
         ))
         ws2.cell(row=r, column=4, value=f"=B{r}-C{r}")
         for col in (2, 3, 4):
@@ -367,6 +375,12 @@ def build_excel(df: pd.DataFrame) -> io.BytesIO:
     for col in (2, 3, 4):
         ws2.cell(row=m_total, column=col).number_format = '"$"#,##0.00'
     style_total_row(ws2, m_total, len(headers2))
+
+    # Negative Net (the month lost money) shows in dark red, including the TOTAL row.
+    ws2.conditional_formatting.add(
+        f"D{m_first}:D{m_total}",
+        CellIsRule(operator="lessThan", formula=["0"], font=Font(name="Calibri", size=11, color=DEBIT_COLOR)),
+    )
 
     ws2.column_dimensions["A"].width = 16.66
     ws2.column_dimensions["B"].width = 18.33
