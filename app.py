@@ -65,12 +65,13 @@ def parse_pdf(path):
 
             # Detect column x-positions from header row
             x_desc = x_debit = x_credit = x_bal = None
+            x1_debit = x1_credit = x1_bal = None
             for w in words:
                 t = w["text"]
                 if t == "Description":  x_desc   = w["x0"]
-                if "Cheques"   in t:    x_debit  = w["x0"]
-                if "Deposits"  in t:    x_credit = w["x0"]
-                if t == "Balance($)":   x_bal    = w["x0"]
+                if "Cheques"   in t:    x_debit, x1_debit  = w["x0"], w["x1"]
+                if "Deposits"  in t:    x_credit, x1_credit = w["x0"], w["x1"]
+                if t == "Balance($)":   x_bal, x1_bal    = w["x0"], w["x1"]
             if not x_debit: continue
 
             # Find activity section start Y
@@ -89,15 +90,31 @@ def parse_pdf(path):
                 if re.search(r"Description|Cheques|Deposits|Balance\(\$\)|Closingbalance|AccountFees|\dof\d|Openingbalance", line, re.I):
                     continue
 
-                # Assign words to columns by x position
+                # Date/Description are left-aligned, so their left edge (x0) is a
+                # reliable boundary. But Debit/Credit/Balance are right-aligned
+                # numbers of varying width (e.g. "6.00" vs "12,083.69"), so their
+                # LEFT edge shifts a lot — comparing x0 against a fixed threshold
+                # can drop a short number into the next column, or a long one into
+                # the previous column. Their RIGHT edge (x1), however, stays put
+                # regardless of digit count, so amounts are classified by whichever
+                # column's right edge their x1 is closest to.
                 date_t = desc_t = debit_t = credit_t = bal_t = ""
                 for w in rw:
-                    x, t = w["x0"], w["text"]
-                    if x < x_desc:                  date_t   += t + " "
-                    elif x < x_debit:               desc_t   += t + " "
-                    elif x < x_credit:              debit_t  += t + " "
-                    elif x < x_bal:                 credit_t += t + " "
-                    else:                           bal_t    += t + " "
+                    x0, x1, t = w["x0"], w["x1"], w["text"]
+                    if x0 < x_desc:
+                        date_t += t + " "
+                    elif x0 < x_debit:
+                        desc_t += t + " "
+                    else:
+                        dists = {
+                            "debit":  abs(x1 - x1_debit),
+                            "credit": abs(x1 - x1_credit),
+                            "bal":    abs(x1 - x1_bal),
+                        }
+                        closest = min(dists, key=dists.get)
+                        if closest == "debit":   debit_t  += t + " "
+                        elif closest == "credit": credit_t += t + " "
+                        else:                     bal_t    += t + " "
 
                 # Parse date if present
                 dm = DATE.match(date_t.strip().replace(" ",""))
@@ -424,7 +441,9 @@ if uploaded:
     if all_rows:
         df = pd.DataFrame(all_rows).reset_index(drop=True)
         df["Date"] = pd.to_datetime(df["Date"]).dt.date
-        df = df.sort_values("Date").reset_index(drop=True)
+        # Stable sort: same-day transactions must keep the order they appear in
+        # the statement (the running-balance formula depends on that sequence).
+        df = df.sort_values("Date", kind="stable").reset_index(drop=True)
 
         preview = df.copy()
         preview["Year"] = preview["Date"].apply(lambda d: d.year)
