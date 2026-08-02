@@ -5,34 +5,35 @@ import re, io, tempfile
 from datetime import datetime
 from zoneinfo import ZoneInfo
 from pathlib import Path
-
-TORONTO_TZ = ZoneInfo("America/Toronto")
 from collections import defaultdict
 from openpyxl import Workbook
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
-from openpyxl.utils import get_column_letter
 from openpyxl.formatting.rule import FormulaRule
+
+TORONTO_TZ = ZoneInfo("America/Toronto")
 
 st.set_page_config(page_title="RBC → Excel", page_icon="🏦", layout="centered")
 st.title("🏦 RBC Bank Statements → Excel")
-st.caption("Sube uno o varios PDFs de RBC — descarga todos los movimientos en Excel")
+st.caption("Upload one or more RBC PDFs — download all transactions as Excel")
 
 MONTH_MAP = {"Jan":1,"Feb":2,"Mar":3,"Apr":4,"May":5,"Jun":6,
              "Jul":7,"Aug":8,"Sep":9,"Oct":10,"Nov":11,"Dec":12}
 DATE = re.compile(r"^(\d{1,2})(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)", re.I)
 
-# ── Categorías: mismas reglas que la fórmula que se escribe en Excel ──
+# ── Categories: same rules as the formula written into Excel ──
 CATEGORIES = ["Airbnb", "Transfer", "Wire Payment", "Bank Fee", "Cash Withdrawal", "Other"]
 
-# Color por categoría (fondo + texto blanco en negrita)
+# Professional pastel palette — one color per category, shared by the Transactions
+# sheet (Category column) and the Category Summary sheet (whole row).
 CATEGORY_COLORS = {
-    "Airbnb":          "FF5A5F",  # rojo/rosa de marca Airbnb
-    "Transfer":        "2E75B6",  # azul
-    "Wire Payment":    "7030A0",  # morado
-    "Bank Fee":        "E67E22",  # naranja
-    "Cash Withdrawal": "795548",  # café
-    "Other":           "95A5A6",  # gris
+    "Airbnb":          "F9D9DC",  # soft rose
+    "Transfer":        "D9E6F7",  # soft sky blue
+    "Wire Payment":    "E4DBF2",  # soft lavender
+    "Bank Fee":        "FBE8D2",  # soft peach
+    "Cash Withdrawal": "E6DDD2",  # soft taupe
+    "Other":           "E4E7E9",  # soft gray
 }
+CATEGORY_TEXT_COLOR = "3A3A3A"  # dark charcoal, readable on every pastel above
 
 
 def get_years(text):
@@ -50,7 +51,7 @@ def to_num(s):
     return float(s.replace(",","")) if re.match(r"^[\d,]+\.\d{2}$", s) else None
 
 def parse_pdf(path):
-    raw = []  # list of {date, desc, debit, credit, balance} — one por PDF row
+    raw = []  # list of {date, desc, debit, credit, balance} — one per PDF row
     with pdfplumber.open(path) as pdf:
         anchors = get_years("\n".join(p.extract_text() or "" for p in pdf.pages))
         cur_date = None
@@ -139,15 +140,15 @@ def parse_pdf(path):
     result = [r for r in merged if r["desc"]]
 
     return [{
-        "Fecha":       r["date"],
-        "Descripcion": r["desc"],
-        "Credito":     r["credit"],
-        "Debito":      r["debit"],
+        "Date":        r["date"],
+        "Description": r["desc"],
+        "Credit":      r["credit"],
+        "Debit":       r["debit"],
         "Balance":     r["balance"],
     } for r in result]
 
 
-# ── Estilos (colores/fuentes replicados del formato de referencia) ──────
+# ── Styles (colors/fonts replicated from the reference template) ──────
 NAVY      = "1F4E79"
 BLUE      = "2E75B6"
 LIGHT_BLU = "D6E3F8"
@@ -211,15 +212,15 @@ def finalize_sheet(ws):
     ws.sheet_view.zoomScale = 125
 
 
-# ── Construcción del Excel final (3 hojas) ───────────────────────────
+# ── Build the final Excel workbook (3 sheets) ───────────────────────────
 def build_excel(df: pd.DataFrame) -> io.BytesIO:
     wb = Workbook()
     wb.remove(wb.active)
 
-    # ---------- Hoja 1: Transactions ----------
+    # ---------- Sheet 1: Transactions ----------
     ws = wb.create_sheet("Transactions")
     headers = ["Year", "Month", "Day", "Date", "Description",
-               "Credit", "Debit", "Balance (PDF)", "Balance (Fórmula)", "File", "Category"]
+               "Credit", "Debit", "Balance (PDF)", "Balance (Formula)", "File", "Category"]
     ncols = len(headers)
 
     style_title(ws, "📊 Bank Account Statement - Transactions", ncols, size=18)
@@ -231,28 +232,28 @@ def build_excel(df: pd.DataFrame) -> io.BytesIO:
 
     for i, row in enumerate(df.itertuples(index=False)):
         r = first_data_row + i
-        ws.cell(row=r, column=1, value=row.Fecha.year)
-        ws.cell(row=r, column=2, value=row.Fecha.month)
-        ws.cell(row=r, column=3, value=row.Fecha.day)
-        dcell = ws.cell(row=r, column=4, value=datetime.combine(row.Fecha, datetime.min.time()))
+        ws.cell(row=r, column=1, value=row.Date.year)
+        ws.cell(row=r, column=2, value=row.Date.month)
+        ws.cell(row=r, column=3, value=row.Date.day)
+        dcell = ws.cell(row=r, column=4, value=datetime.combine(row.Date, datetime.min.time()))
         dcell.number_format = "mm-dd-yy"
-        ws.cell(row=r, column=5, value=row.Descripcion)
-        if pd.notna(row.Credito):
-            ws.cell(row=r, column=6, value=row.Credito)
-        if pd.notna(row.Debito):
-            ws.cell(row=r, column=7, value=row.Debito)
-        # Balance (PDF): valor real extraído del estado de cuenta del banco (no es una
-        # fórmula, porque es el saldo oficial del banco, no algo derivado en la hoja)
+        ws.cell(row=r, column=5, value=row.Description)
+        if pd.notna(row.Credit):
+            ws.cell(row=r, column=6, value=row.Credit)
+        if pd.notna(row.Debit):
+            ws.cell(row=r, column=7, value=row.Debit)
+        # Balance (PDF): the real value extracted from the bank's statement (not a
+        # formula, since it's the bank's official balance, not something derived here)
         if pd.notna(row.Balance):
             ws.cell(row=r, column=8, value=row.Balance)
-        # Balance (Fórmula): recalculado a partir de Créditos/Débitos, fila 1 se ancla
-        # al saldo real del PDF y de ahí en adelante se arrastra con fórmula
+        # Balance (Formula): recomputed from Credit/Debit. Row 1 is anchored to the
+        # real PDF balance, and every row after that chains forward with a formula.
         if i == 0:
             ws.cell(row=r, column=9, value=row.Balance)
         else:
             ws.cell(row=r, column=9, value=f"=I{r-1}+F{r}-G{r}")
-        ws.cell(row=r, column=10, value=row.Archivo)
-        # Categoría: fórmula dinámica basada en la descripción (se recalcula si se edita)
+        ws.cell(row=r, column=10, value=row.File)
+        # Category: dynamic formula based on the description (recalculates if edited)
         ws.cell(row=r, column=11, value=(
             f'=IF(ISNUMBER(SEARCH("AIRBNB",E{r})),"Airbnb",'
             f'IF(ISNUMBER(SEARCH("transfer",E{r})),"Transfer",'
@@ -271,7 +272,7 @@ def build_excel(df: pd.DataFrame) -> io.BytesIO:
     ws.cell(row=total_row, column=6, value=f"=SUM(F{first_data_row}:F{last_data_row})")
     ws.cell(row=total_row, column=7, value=f"=SUM(G{first_data_row}:G{last_data_row})")
     ws.cell(row=total_row, column=8, value=f"=F{total_row}-G{total_row}")
-    # Balance (Fórmula) no se totaliza: es un saldo, no algo acumulable con SUM
+    # Balance (Formula) is not totaled: it's a running balance, not something summable
     for col in (6, 7, 8):
         ws.cell(row=total_row, column=col).number_format = '"$"#,##0.00'
     style_total_row(ws, total_row, ncols)
@@ -281,15 +282,15 @@ def build_excel(df: pd.DataFrame) -> io.BytesIO:
     for col, w in widths.items():
         ws.column_dimensions[col].width = w
 
-    # Colores por categoría: formato condicional sobre la columna K, así se recalcula
-    # automáticamente si el usuario edita una descripción y la categoría cambia.
+    # Category colors: conditional formatting on column K, so it stays in sync
+    # automatically if the user edits a description and the category changes.
     for cat, color in CATEGORY_COLORS.items():
         ws.conditional_formatting.add(
             f"K{first_data_row}:K{last_data_row}",
             FormulaRule(
                 formula=[f'$K{first_data_row}="{cat}"'],
                 fill=PatternFill("solid", fgColor=color),
-                font=Font(name="Calibri", size=10, bold=True, color=WHITE),
+                font=Font(name="Calibri", size=10, bold=True, color=CATEGORY_TEXT_COLOR),
                 stopIfTrue=True,
             ),
         )
@@ -297,13 +298,13 @@ def build_excel(df: pd.DataFrame) -> io.BytesIO:
     ws.freeze_panes = "A4"
     finalize_sheet(ws)
 
-    # ---------- Hoja 2: Monthly Summary ----------
+    # ---------- Sheet 2: Monthly Summary ----------
     ws2 = wb.create_sheet("Monthly Summary")
     headers2 = ["Month", "Credits", "Debits", "Net"]
     style_title(ws2, "📅 Monthly Summary", len(headers2), size=16)
     style_header(ws2, 3, headers2)
 
-    months = sorted({(d.year, d.month) for d in df["Fecha"]})
+    months = sorted({(d.year, d.month) for d in df["Date"]})
     m_first = 4
     for i, (y, m) in enumerate(months):
         r = m_first + i
@@ -340,7 +341,7 @@ def build_excel(df: pd.DataFrame) -> io.BytesIO:
     ws2.freeze_panes = "A4"
     finalize_sheet(ws2)
 
-    # ---------- Hoja 3: Category Summary ----------
+    # ---------- Sheet 3: Category Summary ----------
     ws3 = wb.create_sheet("Category Summary")
     headers3 = ["Category", "Count", "Percentage"]
     style_title(ws3, "🏷️ Category Summary", len(headers3), size=16)
@@ -356,12 +357,12 @@ def build_excel(df: pd.DataFrame) -> io.BytesIO:
         ws3.cell(row=r, column=3).number_format = "0.0%"
         style_data_row(ws3, r, len(headers3), c_first, is_first=(i == 0), size=11)
 
-        # Colorear la fila entera con el color de su categoría
-        color = CATEGORY_COLORS.get(cat, "95A5A6")
+        # Color the whole row with this category's color (same palette as Transactions)
+        color = CATEGORY_COLORS.get(cat, "E4E7E9")
         for col in (1, 2, 3):
             cc = ws3.cell(row=r, column=col)
             cc.fill = PatternFill("solid", fgColor=color)
-            cc.font = Font(name="Calibri", size=11, bold=True, color=WHITE)
+            cc.font = Font(name="Calibri", size=11, bold=True, color=CATEGORY_TEXT_COLOR)
         ws3.cell(row=r, column=1).alignment = Alignment(horizontal="left", vertical="center")
 
     c_last = c_first + len(CATEGORIES) - 1
@@ -386,8 +387,8 @@ def build_excel(df: pd.DataFrame) -> io.BytesIO:
 
 # ── UI ─────────────────────────────────────────────────────────────
 uploaded = st.file_uploader(
-    "Sube los PDFs de RBC", type="pdf", accept_multiple_files=True,
-    help="Puedes subir varios meses a la vez"
+    "Upload RBC PDFs", type="pdf", accept_multiple_files=True,
+    help="You can upload several months at once"
 )
 
 if uploaded:
@@ -397,25 +398,25 @@ if uploaded:
             tmp.write(f.read())
         try:
             rows = parse_pdf(Path(tmp.name))
-            for r in rows: r["Archivo"] = f.name
+            for r in rows: r["File"] = f.name
             all_rows.extend(rows)
-            st.success(f"✅ {f.name} → {len(rows)} transacciones")
+            st.success(f"✅ {f.name} → {len(rows)} transactions")
         except Exception as e:
             st.error(f"❌ {f.name}: {e}")
 
     if all_rows:
         df = pd.DataFrame(all_rows).reset_index(drop=True)
-        df["Fecha"] = pd.to_datetime(df["Fecha"]).dt.date
-        df = df.sort_values("Fecha").reset_index(drop=True)
+        df["Date"] = pd.to_datetime(df["Date"]).dt.date
+        df = df.sort_values("Date").reset_index(drop=True)
 
         preview = df.copy()
-        preview["Año"] = preview["Fecha"].apply(lambda d: d.year)
-        preview["Mes"] = preview["Fecha"].apply(lambda d: d.month)
-        preview["Dia"] = preview["Fecha"].apply(lambda d: d.day)
-        preview = preview[["Año","Mes","Dia","Fecha","Descripcion","Credito","Debito","Balance","Archivo"]]
+        preview["Year"] = preview["Date"].apply(lambda d: d.year)
+        preview["Month"] = preview["Date"].apply(lambda d: d.month)
+        preview["Day"] = preview["Date"].apply(lambda d: d.day)
+        preview = preview[["Year","Month","Day","Date","Description","Credit","Debit","Balance","File"]]
 
         st.divider()
-        st.subheader(f"📋 {len(df)} transacciones")
+        st.subheader(f"📋 {len(df)} transactions")
         st.dataframe(preview, use_container_width=True, hide_index=True)
 
         buf = build_excel(df)
@@ -424,7 +425,7 @@ if uploaded:
         filename = f"RBC_Analysis_Bank_Statements_{timestamp}.xlsx"
 
         st.download_button(
-            "⬇️ Descargar Excel",
+            "⬇️ Download Excel",
             data=buf, file_name=filename,
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             type="primary", use_container_width=True,
