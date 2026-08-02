@@ -3,9 +3,14 @@ import pdfplumber
 import pandas as pd
 import re, io, tempfile
 from datetime import datetime
+from zoneinfo import ZoneInfo
 from pathlib import Path
+
+TORONTO_TZ = ZoneInfo("America/Toronto")
 from collections import defaultdict
-from openpyxl.styles import Font, PatternFill, Alignment
+from openpyxl import Workbook
+from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+from openpyxl.utils import get_column_letter
 
 st.set_page_config(page_title="RBC → Excel", page_icon="🏦", layout="centered")
 st.title("🏦 RBC Bank Statements → Excel")
@@ -14,6 +19,10 @@ st.caption("Sube uno o varios PDFs de RBC — descarga todos los movimientos en 
 MONTH_MAP = {"Jan":1,"Feb":2,"Mar":3,"Apr":4,"May":5,"Jun":6,
              "Jul":7,"Aug":8,"Sep":9,"Oct":10,"Nov":11,"Dec":12}
 DATE = re.compile(r"^(\d{1,2})(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)", re.I)
+
+# ── Categorías: mismas reglas que la fórmula que se escribe en Excel ──
+CATEGORIES = ["Airbnb", "Transfer", "Wire Payment", "Bank Fee", "Other"]
+
 
 def get_years(text):
     pat = re.compile(r"(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\s*\d{1,2}[,\s]+(\d{4})", re.I)
@@ -30,7 +39,7 @@ def to_num(s):
     return float(s.replace(",","")) if re.match(r"^[\d,]+\.\d{2}$", s) else None
 
 def parse_pdf(path):
-    raw = []  # list of {date, desc, debit, credit, balance} — one per PDF row
+    raw = []  # list of {date, desc, debit, credit, balance} — one por PDF row
     with pdfplumber.open(path) as pdf:
         anchors = get_years("\n".join(p.extract_text() or "" for p in pdf.pages))
         cur_date = None
@@ -126,6 +135,217 @@ def parse_pdf(path):
         "Balance":     r["balance"],
     } for r in result]
 
+
+# ── Estilos (colores/fuentes replicados del formato de referencia) ──────
+NAVY      = "1F4E79"
+BLUE      = "2E75B6"
+LIGHT_BLU = "D6E3F8"
+ROW_TINT  = "F2F7FC"
+WHITE     = "FFFFFF"
+GRID_GRAY = "D9D9D9"
+
+THIN_GRAY   = Side(style="thin", color=GRID_GRAY)
+MEDIUM_NAVY = Side(style="medium", color=NAVY)
+DOUBLE_NAVY = Side(style="double", color=NAVY)
+
+CELL_BORDER      = Border(left=THIN_GRAY, right=THIN_GRAY, top=THIN_GRAY, bottom=THIN_GRAY)
+TOP_RULE_BORDER  = Border(left=THIN_GRAY, right=THIN_GRAY, top=MEDIUM_NAVY, bottom=THIN_GRAY)
+HEADER_BORDER    = Border(top=MEDIUM_NAVY)
+TOTAL_BORDER     = Border(top=DOUBLE_NAVY)
+
+
+def style_title(ws, text, ncols, size=18):
+    ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=ncols)
+    c = ws.cell(row=1, column=1, value=text)
+    c.font = Font(name="Calibri", size=size, bold=True, color=NAVY)
+    c.fill = PatternFill("solid", fgColor=LIGHT_BLU)
+    c.alignment = Alignment(horizontal="center", vertical="center")
+    ws.row_dimensions[1].height = 40 if size >= 18 else 35
+    ws.row_dimensions[2].height = 6
+
+
+def style_header(ws, row, headers):
+    for i, h in enumerate(headers, start=1):
+        c = ws.cell(row=row, column=i, value=h)
+        c.font = Font(name="Calibri", size=11, bold=True, color=WHITE)
+        c.fill = PatternFill("solid", fgColor=BLUE)
+        c.alignment = Alignment(horizontal="center", vertical="center")
+        c.border = HEADER_BORDER
+    ws.row_dimensions[row].height = 28
+
+
+def style_data_row(ws, row, ncols, first_data_row, is_first, size=11):
+    fill = ROW_TINT if is_first or row % 2 == first_data_row % 2 else WHITE
+    for col in range(1, ncols + 1):
+        c = ws.cell(row=row, column=col)
+        c.font = Font(name="Calibri", size=size)
+        c.fill = PatternFill("solid", fgColor=fill)
+        c.alignment = Alignment(horizontal=c.alignment.horizontal or "center", vertical="center")
+        c.border = TOP_RULE_BORDER if row == first_data_row else CELL_BORDER
+    ws.row_dimensions[row].height = 20 if size == 10 else 22
+
+
+def style_total_row(ws, row, ncols):
+    for col in range(1, ncols + 1):
+        c = ws.cell(row=row, column=col)
+        c.font = Font(name="Calibri", size=11, bold=True, color=WHITE)
+        c.fill = PatternFill("solid", fgColor=BLUE)
+        c.alignment = Alignment(horizontal=c.alignment.horizontal or "center", vertical="center")
+        c.border = TOTAL_BORDER
+    ws.row_dimensions[row].height = 25
+
+
+def finalize_sheet(ws):
+    ws.sheet_view.showGridLines = False
+    ws.sheet_view.zoomScale = 125
+
+
+# ── Construcción del Excel final (3 hojas) ───────────────────────────
+def build_excel(df: pd.DataFrame) -> io.BytesIO:
+    wb = Workbook()
+    wb.remove(wb.active)
+
+    # ---------- Hoja 1: Transactions ----------
+    ws = wb.create_sheet("Transactions")
+    headers = ["Year", "Month", "Day", "Date", "Description",
+               "Credit", "Debit", "Balance", "File", "Category"]
+    ncols = len(headers)
+
+    style_title(ws, "📊 Bank Account Statement - Transactions", ncols, size=18)
+    style_header(ws, 3, headers)
+
+    first_data_row = 4
+    n = len(df)
+    last_data_row = first_data_row + n - 1
+
+    for i, row in enumerate(df.itertuples(index=False)):
+        r = first_data_row + i
+        ws.cell(row=r, column=1, value=row.Fecha.year)
+        ws.cell(row=r, column=2, value=row.Fecha.month)
+        ws.cell(row=r, column=3, value=row.Fecha.day)
+        dcell = ws.cell(row=r, column=4, value=datetime.combine(row.Fecha, datetime.min.time()))
+        dcell.number_format = "mm-dd-yy"
+        ws.cell(row=r, column=5, value=row.Descripcion)
+        if pd.notna(row.Credito):
+            ws.cell(row=r, column=6, value=row.Credito)
+        if pd.notna(row.Debito):
+            ws.cell(row=r, column=7, value=row.Debito)
+        # Balance: valor real extraído del PDF del banco (no se recalcula por fórmula,
+        # porque es el saldo oficial del estado de cuenta, no algo derivado en la hoja)
+        if pd.notna(row.Balance):
+            ws.cell(row=r, column=8, value=row.Balance)
+        ws.cell(row=r, column=9, value=row.Archivo)
+        # Categoría: fórmula dinámica basada en la descripción (se recalcula si se edita)
+        ws.cell(row=r, column=10, value=(
+            f'=IF(ISNUMBER(SEARCH("AIRBNB",E{r})),"Airbnb",'
+            f'IF(ISNUMBER(SEARCH("transfer",E{r})),"Transfer",'
+            f'IF(ISNUMBER(SEARCH("wire",E{r})),"Wire Payment",'
+            f'IF(ISNUMBER(SEARCH("fee",E{r})),"Bank Fee","Other"))))'
+        ))
+
+        for col in (6, 7, 8):
+            ws.cell(row=r, column=col).number_format = '"$"#,##0.00'
+
+        style_data_row(ws, r, ncols, first_data_row, is_first=(i == 0), size=10)
+
+    total_row = last_data_row + 1
+    ws.cell(row=total_row, column=5, value="TOTAL")
+    ws.cell(row=total_row, column=6, value=f"=SUM(F{first_data_row}:F{last_data_row})")
+    ws.cell(row=total_row, column=7, value=f"=SUM(G{first_data_row}:G{last_data_row})")
+    ws.cell(row=total_row, column=8, value=f"=F{total_row}-G{total_row}")
+    for col in (6, 7, 8):
+        ws.cell(row=total_row, column=col).number_format = '"$"#,##0.00'
+    style_total_row(ws, total_row, ncols)
+
+    widths = {"A": 8.33, "B": 6.66, "C": 6.66, "D": 15, "E": 46.66,
+              "F": 14.16, "G": 14.16, "H": 15, "I": 41.66, "J": 16.66}
+    for col, w in widths.items():
+        ws.column_dimensions[col].width = w
+
+    ws.freeze_panes = "A4"
+    finalize_sheet(ws)
+
+    # ---------- Hoja 2: Monthly Summary ----------
+    ws2 = wb.create_sheet("Monthly Summary")
+    headers2 = ["Month", "Credits", "Debits", "Net"]
+    style_title(ws2, "📅 Monthly Summary", len(headers2), size=16)
+    style_header(ws2, 3, headers2)
+
+    months = sorted({(d.year, d.month) for d in df["Fecha"]})
+    m_first = 4
+    for i, (y, m) in enumerate(months):
+        r = m_first + i
+        ws2.cell(row=r, column=1, value=f"{y}-{m:02d}")
+        ws2.cell(row=r, column=2, value=(
+            f"=SUMPRODUCT((YEAR(Transactions!$D${first_data_row}:$D${last_data_row})={y})*"
+            f"(MONTH(Transactions!$D${first_data_row}:$D${last_data_row})={m})*"
+            f"(Transactions!$F${first_data_row}:$F${last_data_row}))"
+        ))
+        ws2.cell(row=r, column=3, value=(
+            f"=SUMPRODUCT((YEAR(Transactions!$D${first_data_row}:$D${last_data_row})={y})*"
+            f"(MONTH(Transactions!$D${first_data_row}:$D${last_data_row})={m})*"
+            f"(Transactions!$G${first_data_row}:$G${last_data_row}))"
+        ))
+        ws2.cell(row=r, column=4, value=f"=B{r}-C{r}")
+        for col in (2, 3, 4):
+            ws2.cell(row=r, column=col).number_format = '"$"#,##0.00'
+        style_data_row(ws2, r, len(headers2), m_first, is_first=(i == 0), size=11)
+
+    m_last = m_first + len(months) - 1
+    m_total = m_last + 1
+    ws2.cell(row=m_total, column=1, value="TOTAL")
+    ws2.cell(row=m_total, column=2, value=f"=SUM(B{m_first}:B{m_last})")
+    ws2.cell(row=m_total, column=3, value=f"=SUM(C{m_first}:C{m_last})")
+    ws2.cell(row=m_total, column=4, value=f"=SUM(D{m_first}:D{m_last})")
+    for col in (2, 3, 4):
+        ws2.cell(row=m_total, column=col).number_format = '"$"#,##0.00'
+    style_total_row(ws2, m_total, len(headers2))
+
+    ws2.column_dimensions["A"].width = 16.66
+    ws2.column_dimensions["B"].width = 18.33
+    ws2.column_dimensions["C"].width = 18.33
+    ws2.column_dimensions["D"].width = 16.66
+    ws2.freeze_panes = "A4"
+    finalize_sheet(ws2)
+
+    # ---------- Hoja 3: Category Summary ----------
+    ws3 = wb.create_sheet("Category Summary")
+    headers3 = ["Category", "Count", "Percentage"]
+    style_title(ws3, "🏷️ Category Summary", len(headers3), size=16)
+    style_header(ws3, 3, headers3)
+
+    c_first = 4
+    for i, cat in enumerate(CATEGORIES):
+        r = c_first + i
+        ws3.cell(row=r, column=1, value=cat)
+        ws3.cell(row=r, column=2, value=f"=COUNTIF(Transactions!$J:$J,A{r})")
+        c_last_preview = c_first + len(CATEGORIES) - 1
+        ws3.cell(row=r, column=3, value=f"=B{r}/SUM($B${c_first}:$B${c_last_preview})")
+        ws3.cell(row=r, column=3).number_format = "0.0%"
+        ws3.cell(row=r, column=1).alignment = Alignment(horizontal="left", vertical="center")
+        style_data_row(ws3, r, len(headers3), c_first, is_first=(i == 0), size=11)
+        ws3.cell(row=r, column=1).alignment = Alignment(horizontal="left", vertical="center")
+
+    c_last = c_first + len(CATEGORIES) - 1
+    c_total = c_last + 1
+    ws3.cell(row=c_total, column=1, value="TOTAL")
+    ws3.cell(row=c_total, column=2, value=f"=SUM(B{c_first}:B{c_last})")
+    ws3.cell(row=c_total, column=3, value=f"=SUM(C{c_first}:C{c_last})")
+    ws3.cell(row=c_total, column=3).number_format = "0.0%"
+    style_total_row(ws3, c_total, len(headers3))
+
+    ws3.column_dimensions["A"].width = 21.66
+    ws3.column_dimensions["B"].width = 16.66
+    ws3.column_dimensions["C"].width = 16.66
+    ws3.freeze_panes = "A4"
+    finalize_sheet(ws3)
+
+    buf = io.BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+    return buf
+
+
 # ── UI ─────────────────────────────────────────────────────────────
 uploaded = st.file_uploader(
     "Sube los PDFs de RBC", type="pdf", accept_multiple_files=True,
@@ -147,35 +367,27 @@ if uploaded:
 
     if all_rows:
         df = pd.DataFrame(all_rows).reset_index(drop=True)
-        df["Fecha"] = pd.to_datetime(df["Fecha"])
-        df["Año"]  = df["Fecha"].dt.year
-        df["Mes"]  = df["Fecha"].dt.month
-        df["Dia"]  = df["Fecha"].dt.day
-        df = df[["Año","Mes","Dia","Fecha","Descripcion","Credito","Debito","Balance","Archivo"]]
+        df["Fecha"] = pd.to_datetime(df["Fecha"]).dt.date
+        df = df.sort_values("Fecha").reset_index(drop=True)
+
+        preview = df.copy()
+        preview["Año"] = preview["Fecha"].apply(lambda d: d.year)
+        preview["Mes"] = preview["Fecha"].apply(lambda d: d.month)
+        preview["Dia"] = preview["Fecha"].apply(lambda d: d.day)
+        preview = preview[["Año","Mes","Dia","Fecha","Descripcion","Credito","Debito","Balance","Archivo"]]
 
         st.divider()
         st.subheader(f"📋 {len(df)} transacciones")
-        st.dataframe(df, use_container_width=True, hide_index=True)
+        st.dataframe(preview, use_container_width=True, hide_index=True)
 
-        buf = io.BytesIO()
-        with pd.ExcelWriter(buf, engine="openpyxl") as writer:
-            df.to_excel(writer, index=False, sheet_name="Movimientos")
-            ws = writer.sheets["Movimientos"]
-            for cell in ws[1]:
-                cell.font = Font(bold=True, color="FFFFFF", name="Arial")
-                cell.fill = PatternFill("solid", fgColor="1F3864")
-                cell.alignment = Alignment(horizontal="center")
-            for col, w in zip("ABCDEFGHI", [6,5,5,14,52,12,12,12,30]):
-                ws.column_dimensions[col].width = w
-            for row in ws.iter_rows(min_row=2):
-                row[3].number_format = "YYYY-MM-DD"
-                for c in [5,6,7]: row[c].number_format = '#,##0.00'
-            ws.freeze_panes = "A2"
-        buf.seek(0)
+        buf = build_excel(df)
+
+        timestamp = datetime.now(TORONTO_TZ).strftime("%Y-%m-%d_%H-%M")
+        filename = f"RBC_Analysis_Bank_Statements_{timestamp}.xlsx"
 
         st.download_button(
             "⬇️ Descargar Excel",
-            data=buf, file_name="RBC_movimientos.xlsx",
+            data=buf, file_name=filename,
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             type="primary", use_container_width=True,
         )
