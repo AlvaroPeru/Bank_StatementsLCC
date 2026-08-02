@@ -26,17 +26,17 @@ CATEGORIES = ["Airbnb", "Transfer", "Wire Payment", "Bank Fee", "Cash Withdrawal
 # Professional pastel palette — one color per category, shared by the Transactions
 # sheet (Category column) and the Category Summary sheet (whole row).
 CATEGORY_COLORS = {
-    "Airbnb":          "F9D9DC",  # soft rose
-    "Transfer":        "D9E6F7",  # soft sky blue
-    "Wire Payment":    "E4DBF2",  # soft lavender
-    "Bank Fee":        "FBE8D2",  # soft peach
-    "Cash Withdrawal": "E6DDD2",  # soft taupe
-    "Other":           "E4E7E9",  # soft gray
+    "Airbnb":          "FFF9D9DC",  # soft rose
+    "Transfer":        "FFD9E6F7",  # soft sky blue
+    "Wire Payment":    "FFE4DBF2",  # soft lavender
+    "Bank Fee":        "FFFBE8D2",  # soft peach
+    "Cash Withdrawal": "FFE6DDD2",  # soft taupe
+    "Other":           "FFE4E7E9",  # soft gray
 }
-CATEGORY_TEXT_COLOR = "3A3A3A"  # dark charcoal, readable on every pastel above
+CATEGORY_TEXT_COLOR = "FF3A3A3A"  # dark charcoal, readable on every pastel above
 
-CREDIT_COLOR = "1E7145"  # dark green — positive amounts (Credit / Credits)
-DEBIT_COLOR  = "B22222"  # dark red   — negative amounts (Debit / Debits)
+CREDIT_COLOR = "FF1E7145"  # dark green — positive amounts (Credit / Credits)
+DEBIT_COLOR  = "FFB22222"  # dark red   — negative amounts (Debit / Debits)
 
 
 def get_years(text):
@@ -152,12 +152,15 @@ def parse_pdf(path):
 
 
 # ── Styles (colors/fonts replicated from the reference template) ──────
-NAVY      = "1F4E79"
-BLUE      = "2E75B6"
-LIGHT_BLU = "D6E3F8"
-ROW_TINT  = "F2F7FC"
-WHITE     = "FFFFFF"
-GRID_GRAY = "D9D9D9"
+# NOTE: all colors use an explicit "FF" alpha prefix (opaque). Without it,
+# openpyxl can write fully-transparent colors that some Excel contexts
+# (especially conditional-formatting fills) render as invisible.
+NAVY      = "FF1F4E79"
+BLUE      = "FF2E75B6"
+LIGHT_BLU = "FFD6E3F8"
+ROW_TINT  = "FFF2F7FC"
+WHITE     = "FFFFFFFF"
+GRID_GRAY = "FFD9D9D9"
 
 THIN_GRAY   = Side(style="thin", color=GRID_GRAY)
 MEDIUM_NAVY = Side(style="medium", color=NAVY)
@@ -294,12 +297,14 @@ def build_excel(df: pd.DataFrame) -> io.BytesIO:
 
     # Category colors: conditional formatting on column K, so it stays in sync
     # automatically if the user edits a description and the category changes.
+    # Note: for conditional-formatting fills, Excel needs both start_color and
+    # end_color set (fgColor-only fills can render invisible in real Excel).
     for cat, color in CATEGORY_COLORS.items():
         ws.conditional_formatting.add(
             f"K{first_data_row}:K{last_data_row}",
             FormulaRule(
                 formula=[f'$K{first_data_row}="{cat}"'],
-                fill=PatternFill("solid", fgColor=color),
+                fill=PatternFill(start_color=color, end_color=color, fill_type="solid"),
                 font=Font(name="Calibri", size=10, bold=True, color=CATEGORY_TEXT_COLOR),
                 stopIfTrue=True,
             ),
