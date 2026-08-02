@@ -35,6 +35,9 @@ CATEGORY_COLORS = {
 }
 CATEGORY_TEXT_COLOR = "3A3A3A"  # dark charcoal, readable on every pastel above
 
+CREDIT_COLOR = "1E7145"  # dark green — positive amounts (Credit / Credits)
+DEBIT_COLOR  = "B22222"  # dark red   — negative amounts (Debit / Debits)
+
 
 def get_years(text):
     pat = re.compile(r"(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\s*\d{1,2}[,\s]+(\d{4})", re.I)
@@ -267,6 +270,13 @@ def build_excel(df: pd.DataFrame) -> io.BytesIO:
 
         style_data_row(ws, r, ncols, first_data_row, is_first=(i == 0), size=10)
 
+        # Positive amounts (Credit) in dark green, negative amounts (Debit) in dark
+        # red. Balance columns are left untouched, as requested.
+        if pd.notna(row.Credit):
+            ws.cell(row=r, column=6).font = Font(name="Calibri", size=10, color=CREDIT_COLOR)
+        if pd.notna(row.Debit):
+            ws.cell(row=r, column=7).font = Font(name="Calibri", size=10, color=DEBIT_COLOR)
+
     total_row = last_data_row + 1
     ws.cell(row=total_row, column=5, value="TOTAL")
     ws.cell(row=total_row, column=6, value=f"=SUM(F{first_data_row}:F{last_data_row})")
@@ -323,6 +333,8 @@ def build_excel(df: pd.DataFrame) -> io.BytesIO:
         for col in (2, 3, 4):
             ws2.cell(row=r, column=col).number_format = '"$"#,##0.00'
         style_data_row(ws2, r, len(headers2), m_first, is_first=(i == 0), size=11)
+        ws2.cell(row=r, column=2).font = Font(name="Calibri", size=11, color=CREDIT_COLOR)
+        ws2.cell(row=r, column=3).font = Font(name="Calibri", size=11, color=DEBIT_COLOR)
 
     m_last = m_first + len(months) - 1
     m_total = m_last + 1
